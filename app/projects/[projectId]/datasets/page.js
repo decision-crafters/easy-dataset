@@ -717,11 +717,28 @@ export default function DatasetsPage({ params }) {
             headers
               .map(header => {
                 // 处理包含逗号、换行符或双引号的字段
-                let field = item[header]?.toString() || '';
-                if (exportOptions.formatType === 'sharegpt') field = JSON.stringify(item[header]);
-                if (field.includes(',') || field.includes('\n') || field.includes('"')) {
+                let field = '';
+
+                // 对于 ShareGPT 格式，需要特殊处理嵌套对象
+                if (exportOptions.formatType === 'sharegpt') {
+                  field = JSON.stringify(item[header]);
+                } else {
+                  // 确保字段值存在并转换为字符串
+                  field = item[header] != null ? String(item[header]) : '';
+                }
+
+                // 确保所有字段都被引号包围，以正确处理中文和特殊字符
+                // 如果字段包含逗号、换行符、引号或任何非ASCII字符，需要特殊处理
+                const needsQuoting = field.includes(',') ||
+                                    field.includes('\n') ||
+                                    field.includes('"') ||
+                                    /[^\x00-\x7F]/.test(field); // 检测非ASCII字符（包括中文）
+
+                if (needsQuoting) {
+                  // 将字段中的双引号替换为两个双引号（CSV标准转义）
                   field = `"${field.replace(/"/g, '""')}"`;
                 }
+
                 return field;
               })
               .join(',')
@@ -734,8 +751,20 @@ export default function DatasetsPage({ params }) {
         content = JSON.stringify(formattedData, null, 2);
         fileExtension = 'json';
       }
-      // 创建 Blob 对象
-      const blob = new Blob([content], { type: mimeType || 'application/json' });
+      // 添加 UTF-8 BOM 标记，确保中文字符正确显示（特别是在 Excel 中打开 CSV 文件时）
+      const utf8BOM = '\uFEFF';
+
+      // 如果是 CSV 格式，添加 BOM 标记
+      if (exportOptions.fileFormat === 'csv') {
+        content = utf8BOM + content;
+      }
+
+      // 创建 Blob 对象，明确指定 UTF-8 编码
+      const blob = new Blob([content], {
+        type: exportOptions.fileFormat === 'csv'
+          ? 'text/csv;charset=utf-8'
+          : `${mimeType || 'application/json'};charset=utf-8`
+      });
 
       // 创建下载链接
       const url = URL.createObjectURL(blob);
@@ -757,13 +786,13 @@ export default function DatasetsPage({ params }) {
 
       setSnackbar({
         open: true,
-        message: '数据集导出成功',
+        message: t('datasets.exportSuccess'),
         severity: 'success'
       });
     } catch (error) {
       setSnackbar({
         open: true,
-        message: '导出失败: ' + error.message,
+        message: t('datasets.exportFailed') + ': ' + error.message,
         severity: 'error'
       });
     }

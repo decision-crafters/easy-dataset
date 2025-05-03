@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { saveFile, getProject, saveTextChunk } from '@/lib/db/index';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
+import { getTextChunkIds } from '@/lib/db/texts';
 
 // 用于处理文本分割的函数
 function splitTextContent(text, minChars = 1500, maxChars = 2000) {
@@ -79,6 +80,7 @@ export async function POST(request, { params }) {
     // 获取项目信息
     const project = await getProject(projectId);
     if (!project) {
+      console.error(`Project with ID ${projectId} does not exist.`);
       return NextResponse.json({ error: 'Project does not exist' }, { status: 404 });
     }
 
@@ -86,65 +88,80 @@ export async function POST(request, { params }) {
     const settings = project.settings || {};
     const textSplitSettings = settings.textSplit || { minChars: 1500, maxChars: 2000 };
 
+    // 确认请求是多部分表单数据
+    if (!request.headers.get('content-type')?.includes('multipart/form-data')) {
+      console.error('Request is not multipart/form-data');
+      return NextResponse.json({ error: 'Request must be multipart/form-data' }, { status: 400 });
+    }
+
     // 获取上传的文件
     const formData = await request.formData();
     const files = formData.getAll('files');
 
     if (!files || files.length === 0) {
+      console.error('No files uploaded in the request.');
       return NextResponse.json({ error: 'No files uploaded' }, { status: 400 });
     }
 
     const results = [];
 
     for (const file of files) {
-      // 只处理Markdown文件
-      if (!file.name.toLowerCase().endsWith('.md')) {
-        continue;
+      try {
+        // 只处理Markdown文件
+        if (!file.name.toLowerCase().endsWith('.md')) {
+          console.warn(`Skipping non-Markdown file: ${file.name}`);
+          continue;
+        }
+
+        console.log('Processing file:', file.name);
+        
+        // 确保文件内容是 Buffer
+        const buffer = Buffer.from(await file.arrayBuffer());
+        const fileName = file.name;
+
+        // 保存原始文件
+        await saveFile(projectId, buffer, fileName);
+
+        // 读取文件内容并分割
+        const text = buffer.toString('utf-8');
+
+        // 提取目录结构
+        const directory = extractDirectoryFromMarkdown(text);
+
+        // 分割文本
+        const chunks = splitTextContent(text, textSplitSettings.minChars, textSplitSettings.maxChars);
+
+        // 保存分割后的文本片段
+        const chunkResults = [];
+        for (let i = 0; i < chunks.length; i++) {
+          const chunkId = uuidv4();
+          const chunkData = {
+            id: chunkId,
+            title: `${fileName}-片段${i + 1}`,
+            content: chunks[i],
+            wordCount: chunks[i].length,
+            fileName: fileName,
+            hasQuestions: false,
+            createdAt: new Date().toISOString()
+          };
+
+          await saveTextChunk(projectId, chunkId, JSON.stringify(chunkData));
+          chunkResults.push(chunkData);
+        }
+
+        results.push({
+          fileName,
+          chunksCount: chunks.length,
+          directory,
+          chunks: chunkResults.map(chunk => ({
+            id: chunk.id,
+            title: chunk.title,
+            wordCount: chunk.wordCount
+          }))
+        });
+      } catch (fileError) {
+        console.error(`Error processing file ${file.name}:`, fileError);
       }
-
-      const buffer = Buffer.from(await file.arrayBuffer());
-      const fileName = file.name;
-
-      // 保存原始文件
-      await saveFile(projectId, buffer, fileName);
-
-      // 读取文件内容并分割
-      const text = buffer.toString('utf-8');
-
-      // 提取目录结构
-      const directory = extractDirectoryFromMarkdown(text);
-
-      // 分割文本
-      const chunks = splitTextContent(text, textSplitSettings.minChars, textSplitSettings.maxChars);
-
-      // 保存分割后的文本片段
-      const chunkResults = [];
-      for (let i = 0; i < chunks.length; i++) {
-        const chunkId = uuidv4();
-        const chunkData = {
-          id: chunkId,
-          title: `${fileName}-片段${i + 1}`,
-          content: chunks[i],
-          wordCount: chunks[i].length,
-          fileName: fileName,
-          hasQuestions: false,
-          createdAt: new Date().toISOString()
-        };
-
-        await saveTextChunk(projectId, chunkId, chunkData);
-        chunkResults.push(chunkData);
-      }
-
-      results.push({
-        fileName,
-        chunksCount: chunks.length,
-        directory,
-        chunks: chunkResults.map(chunk => ({
-          id: chunk.id,
-          title: chunk.title,
-          wordCount: chunk.wordCount
-        }))
-      });
     }
 
     return NextResponse.json(results);

@@ -19,56 +19,76 @@ export async function POST(request, { params }) {
     }
 
     // 获取请求体
-    const { fileName, model, language } = await request.json();
-
-    if (!model) {
-      return NextResponse.json({ error: '请选择模型' }, { status: 400 });
+    let requestData;
+    try {
+      requestData = await request.json();
+    } catch (error) {
+      console.error('Failed to parse request JSON:', error);
+      return NextResponse.json({ error: 'Invalid request format' }, { status: 400 });
     }
 
-    // 验证文件名
-    if (!fileName) {
-      return NextResponse.json({ error: '文件名不能为空' }, { status: 400 });
+    const { fileName, model, language } = requestData;
+
+    // Validate JSON input
+    if (!fileName || typeof fileName !== 'string') {
+      return NextResponse.json({ error: 'Invalid fileName' }, { status: 400 });
     }
+
+    if (!model || typeof model !== 'object') {
+      return NextResponse.json({ error: 'Invalid model configuration' }, { status: 400 });
+    }
+
     const project = await getProject(projectId);
+    if (!project) {
+      return NextResponse.json({ error: 'Project does not exist' }, { status: 404 });
+    }
+    
     const { globalPrompt, domainTreePrompt } = project;
 
     // 分割文本
-    const result = await splitProjectFile(projectId, fileName);
+    try {
+      const result = await splitProjectFile(projectId, fileName);
 
-    const { toc } = result;
-    const llmClient = new LLMClient({
-      provider: model.provider,
-      endpoint: model.endpoint,
-      apiKey: model.apiKey,
-      model: model.name,
-      temperature: model.temperature,
-      maxTokens: model.maxTokens
-    });
-    // 生成领域树
-    console.log(projectId, fileName, 'Text split completed, starting to build domain tree');
-    const promptFunc = language === 'en' ? getLabelEnPrompt : getLabelPrompt;
-    const prompt = promptFunc({ text: toc, globalPrompt, domainTreePrompt });
-    const response = await llmClient.getResponse(prompt);
-    const tags = extractJsonFromLLMOutput(response);
-
-    if (!response || !tags) {
-      // 删除前面生成的文件
-      await deleteFile(projectId, fileName);
-      const uploadedFiles = project.uploadedFiles || [];
-      const updatedFiles = uploadedFiles.filter(f => f !== fileName);
-      await updateProject(projectId, {
-        ...project,
-        uploadedFiles: updatedFiles
+      const { toc } = result;
+      const llmClient = new LLMClient({
+        provider: model.provider,
+        endpoint: model.endpoint,
+        apiKey: model.apiKey,
+        model: model.name,
+        temperature: model.temperature,
+        maxTokens: model.maxTokens
       });
-      return NextResponse.json(
-        { error: 'AI analysis failed, please check model configuration, delete file and retry!' },
-        { status: 400 }
-      );
-    }
-    console.log(projectId, fileName, 'Domain tree built:', tags);
-    await saveTags(projectId, tags);
+      
+      // 生成领域树
+      console.log(projectId, fileName, 'Text split completed, starting to build domain tree');
+      const promptFunc = language === 'en' ? getLabelEnPrompt : getLabelPrompt;
+      const prompt = promptFunc({ text: toc, globalPrompt, domainTreePrompt });
+      const response = await llmClient.getResponse(prompt);
+      const tags = extractJsonFromLLMOutput(response);
 
-    return NextResponse.json({ ...result, tags });
+      if (!response || !tags) {
+        // 删除前面生成的文件
+        await deleteFile(projectId, fileName);
+        const uploadedFiles = project.uploadedFiles || [];
+        const updatedFiles = uploadedFiles.filter(f => f !== fileName);
+        await updateProject(projectId, {
+          ...project,
+          uploadedFiles: updatedFiles
+        });
+        return NextResponse.json(
+          { error: 'AI analysis failed, please check model configuration, delete file and retry!' },
+          { status: 400 }
+        );
+      }
+      
+      console.log(projectId, fileName, 'Domain tree built:', tags);
+      await saveTags(projectId, tags);
+
+      return NextResponse.json({ ...result, tags });
+    } catch (error) {
+      console.error(`Error processing file split for ${fileName}:`, error);
+      return NextResponse.json({ error: `Failed to split file: ${error.message}` }, { status: 500 });
+    }
   } catch (error) {
     console.error('Text split error:', error);
     return NextResponse.json({ error: error.message || 'Text split failed' }, { status: 500 });
